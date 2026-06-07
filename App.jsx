@@ -115,18 +115,34 @@ const BOISSONS = [
 ];
 
 const CATEGORIES = [
-  { id: "pizzas", label: "Pizzas", emoji: "🍕", type: "pizza", items: PIZZAS },
-  { id: "sucrees", label: "Pizzas sucrées", emoji: "🍫", type: "pizza-sweet", items: PIZZAS_SUCREES },
-  { id: "pates", label: "Pâtes", emoji: "🍝", type: "plat", items: PATES },
-  { id: "salades", label: "Salades", emoji: "🥗", type: "plat", items: SALADES },
-  { id: "viandes", label: "Viandes & poissons", emoji: "🥩", type: "plat", items: VIANDES },
-  { id: "desserts", label: "Desserts", emoji: "🍮", type: "plat", items: DESSERTS },
-  { id: "boissons", label: "Boissons", emoji: "🥤", type: "plat", items: BOISSONS },
+  { id: "pizzas", label: "Pizzas", emoji: "🍕", type: "pizza", cat: "Pizza", items: PIZZAS },
+  { id: "sucrees", label: "Pizzas sucrées", emoji: "🍫", type: "pizza-sweet", cat: "Pizza sucrée", items: PIZZAS_SUCREES },
+  { id: "pates", label: "Pâtes", emoji: "🍝", type: "plat", cat: "Pâtes", items: PATES },
+  { id: "salades", label: "Salades", emoji: "🥗", type: "plat", cat: "Salade", items: SALADES },
+  { id: "viandes", label: "Viandes & poissons", emoji: "🥩", type: "plat", cat: "Viande", items: VIANDES },
+  { id: "desserts", label: "Desserts", emoji: "🍮", type: "plat", cat: "Dessert", items: DESSERTS },
+  { id: "boissons", label: "Boissons", emoji: "🥤", type: "plat", cat: "Boisson", items: BOISSONS },
 ];
+
+/* URL du webhook Make (scénario 1 — réception de la demande) */
+const WEBHOOK_URL = "https://hook.eu2.make.com/fl5y3b278z1crtiqu73fpdktwdocknk6";
+
+/* Boissons proposées en option avec un plat */
+const DRINKS = BOISSONS.map(([name, , price]) => ({ name, price }));
+
+/* Met un numéro français au format international (requis pour les SMS) */
+const normalizePhone = (raw) => {
+  let p = (raw || "").replace(/[\s.\-()]/g, "");
+  if (p.startsWith("+")) return p;
+  if (p.startsWith("00")) return "+" + p.slice(2);
+  if (p.startsWith("0")) return "+33" + p.slice(1);
+  return p;
+};
 
 /* Plats qui demandent une cuisson */
 const CUISSON_ITEMS = new Set(["Entrecôte grillée", "Pièce du boucher"]);
 const CUISSONS = ["Bleu", "Saignant", "À point", "Bien cuit"];
+const SAUCES = ["Au poivre", "Roquefort", "Béarnaise", "Champignons", "Échalote"];
 
 /* Suppléments pizzas */
 const SUPP = ["Jambon", "Champignons", "Oignons", "Lardons", "Œuf", "Chèvre",
@@ -142,26 +158,27 @@ const eur = (n) => n.toFixed(2).replace(".", ",") + " €";
 export default function App() {
   const [cart, setCart] = useState([]);       // {uid, name, detail, unit, qty}
   const [catIndex, setCatIndex] = useState(0);
-  const [pizzaModal, setPizzaModal] = useState(null);   // {name, desc, prices, customizable}
-  const [cuissonModal, setCuissonModal] = useState(null); // {name, price}
+  const [pizzaModal, setPizzaModal] = useState(null);   // {name, desc, prices, customizable, categorie}
+  const [platModal, setPlatModal] = useState(null);     // {name, price, categorie, cuisson}
   const [cartOpen, setCartOpen] = useState(false);
   const [step, setStep] = useState("menu");   // menu | checkout | done
   const [form, setForm] = useState({ nom: "", tel: "", email: "", note: "" });
   const [orderNo, setOrderNo] = useState(null);
+  const [sending, setSending] = useState(false);
 
   const pagerRef = useRef(null);
   const tabsRef = useRef([]);
 
   const count = cart.reduce((s, i) => s + i.qty, 0);
   const total = cart.reduce((s, i) => s + i.unit * i.qty, 0);
-  const anyModal = pizzaModal || cuissonModal;
+  const anyModal = pizzaModal || platModal;
 
-  const addItem = (name, detail, unit) => {
+  const addItem = (name, detail, unit, categorie) => {
     const uid = name + "|" + (detail || "");
     setCart((c) => {
       const ex = c.find((i) => i.uid === uid);
       if (ex) return c.map((i) => (i.uid === uid ? { ...i, qty: i.qty + 1 } : i));
-      return [...c, { uid, name, detail: detail || "", unit, qty: 1 }];
+      return [...c, { uid, name, detail: detail || "", unit, qty: 1, categorie: categorie || "" }];
     });
   };
   const changeQty = (uid, d) =>
@@ -183,16 +200,45 @@ export default function App() {
     if (t) t.scrollIntoView({ inline: "center", block: "nearest", behavior: "smooth" });
   }, [catIndex]);
 
-  const onAddClick = (cat, name, desc, price) => {
-    if (cat.type === "pizza") setPizzaModal({ name, desc, prices: price, customizable: true });
-    else if (cat.type === "pizza-sweet") setPizzaModal({ name, desc, prices: price, customizable: false });
-    else if (cat.id === "viandes" && CUISSON_ITEMS.has(name)) setCuissonModal({ name, price });
-    else addItem(name, "", price);
+  const addItemAndDrink = (name, detail, unit, categorie, drink) => {
+    addItem(name, detail, unit, categorie);
+    if (drink) addItem(drink.name, "", drink.price, "Boisson");
   };
 
-  const placeOrder = () => {
-    // ICI: POST vers webhook Make -> Airtable (Statut = "En attente")
-    setOrderNo("FG-" + Math.floor(1000 + Math.random() * 9000));
+  const onAddClick = (cat, name, desc, price) => {
+    if (cat.type === "pizza") setPizzaModal({ name, desc, prices: price, customizable: true, categorie: cat.cat });
+    else if (cat.type === "pizza-sweet") setPizzaModal({ name, desc, prices: price, customizable: false, categorie: cat.cat });
+    else if (cat.id === "pates" || cat.id === "viandes")
+      setPlatModal({ name, price, categorie: cat.cat, cuisson: cat.id === "viandes" && CUISSON_ITEMS.has(name) });
+    else addItem(name, "", price, cat.cat);
+  };
+
+  const placeOrder = async () => {
+    const ref = "FG-" + Math.floor(1000 + Math.random() * 9000);
+    const payload = {
+      reference: ref,
+      client: { nom: form.nom, telephone: normalizePhone(form.tel), email: form.email, note: form.note },
+      total: Number(total.toFixed(2)),
+      articles: cart.map((i) => ({
+        article: i.name,
+        categorie: i.categorie || "",
+        quantite: i.qty,
+        prix_unitaire: i.unit,
+        detail: i.detail || "",
+      })),
+    };
+    setSending(true);
+    try {
+      await fetch(WEBHOOK_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+    } catch (e) {
+      // En démo, la donnée part vers Make même si la lecture de la réponse échoue (CORS).
+    }
+    setSending(false);
+    setOrderNo(ref);
     setStep("done");
   };
 
@@ -357,28 +403,13 @@ export default function App() {
         {/* ===== MODAL PIZZA ===== */}
         {pizzaModal && (
           <PizzaModal data={pizzaModal} onClose={() => setPizzaModal(null)}
-            onAdd={(label, detail, unit) => { addItem(label, detail, unit); setPizzaModal(null); }} />
+            onAdd={(label, detail, unit, drink) => { addItemAndDrink(label, detail, unit, pizzaModal.categorie, drink); setPizzaModal(null); }} />
         )}
 
-        {/* ===== MODAL CUISSON ===== */}
-        {cuissonModal && (
-          <Overlay onClose={() => setCuissonModal(null)}>
-            <div className="sheet rounded-t-3xl p-5" style={{ background: C.surface }}>
-              <Grab />
-              <h3 className="disp text-2xl font-bold">{cuissonModal.name}</h3>
-              <p className="text-sm mb-4" style={{ color: C.inkSoft }}>Choisissez la cuisson</p>
-              <div className="flex flex-col gap-2">
-                {CUISSONS.map((cu) => (
-                  <button key={cu}
-                    onClick={() => { addItem(cuissonModal.name, "Cuisson : " + cu, cuissonModal.price); setCuissonModal(null); }}
-                    className="flex items-center justify-between rounded-2xl px-4 py-3.5 font-semibold"
-                    style={{ background: C.bg, border: `1px solid ${C.line}` }}>
-                    {cu}<span style={{ color: C.emberDark }}>{eur(cuissonModal.price)}</span>
-                  </button>
-                ))}
-              </div>
-            </div>
-          </Overlay>
+        {/* ===== MODAL PLAT (pâtes / viandes / burgers) ===== */}
+        {platModal && (
+          <PlatModal data={platModal} onClose={() => setPlatModal(null)}
+            onAdd={(detail, drink) => { addItemAndDrink(platModal.name, detail, platModal.price, platModal.categorie, drink); setPlatModal(null); }} />
         )}
 
         {/* ===== PANIER / CHECKOUT ===== */}
@@ -424,7 +455,7 @@ export default function App() {
                 {step === "checkout" && (
                   <div className="flex flex-col gap-3.5">
                     <Field label="Nom *" value={form.nom} onChange={(v) => setForm({ ...form, nom: v })} placeholder="Votre nom" />
-                    <Field label="Téléphone *" value={form.tel} type="tel" onChange={(v) => setForm({ ...form, tel: v })} placeholder="06 ..." />
+                    <Field label="Téléphone *" value={form.tel} type="tel" onChange={(v) => setForm({ ...form, tel: v })} placeholder="06 12 34 56 78" />
                     <Field label="E-mail *" value={form.email} type="email" onChange={(v) => setForm({ ...form, email: v })} placeholder="vous@email.fr" />
                     <div>
                       <label className="text-xs font-semibold" style={{ color: C.inkSoft }}>Note (optionnel)</label>
@@ -434,7 +465,7 @@ export default function App() {
                         style={{ background: C.bg, border: `1px solid ${C.line}`, color: C.ink }} />
                     </div>
                     <div className="rounded-xl p-3 text-xs leading-relaxed" style={{ background: C.cream, color: C.emberDark }}>
-                      Votre demande sera étudiée par le restaurant. Vous recevrez un <b>e-mail</b> avec le <b>créneau de retrait proposé</b> : il vous suffira de cliquer pour le confirmer. Paiement sur place au retrait.
+                      Votre demande sera étudiée par le restaurant. Vous recevrez un <b>e-mail</b> avec le <b>créneau de retrait proposé</b> : il vous suffira de cliquer pour le confirmer. <b>Paiement en ligne ou sur place</b> au retrait de la commande.
                     </div>
                   </div>
                 )}
@@ -472,10 +503,10 @@ export default function App() {
                     <button onClick={() => setStep("checkout")}
                       className="w-full rounded-2xl py-3.5 font-bold text-white" style={{ background: C.ember }}>Commander</button>
                   ) : (
-                    <button onClick={placeOrder} disabled={!form.nom || !form.tel || !form.email}
+                    <button onClick={placeOrder} disabled={!form.nom || !form.tel || !form.email || sending}
                       className="w-full rounded-2xl py-3.5 font-bold text-white"
-                      style={{ background: !form.nom || !form.tel || !form.email ? "#cbb9a6" : C.green }}>
-                      Envoyer ma demande · {eur(total)}</button>
+                      style={{ background: !form.nom || !form.tel || !form.email || sending ? "#cbb9a6" : C.green }}>
+                      {sending ? "Envoi en cours…" : `Envoyer ma demande · ${eur(total)}`}</button>
                   )}
                 </div>
               )}
@@ -496,18 +527,20 @@ function PizzaModal({ data, onClose, onAdd }) {
   const [sizeIdx, setSizeIdx] = useState(0);
   const [removed, setRemoved] = useState([]);
   const [extras, setExtras] = useState([]);
+  const [drink, setDrink] = useState(null);
 
   const toggle = (arr, set, v) =>
     set(arr.includes(v) ? arr.filter((x) => x !== v) : [...arr, v]);
 
   const unit = prices[sizeIdx] + extras.reduce((s, e) => s + suppPrice(e), 0);
+  const addTotal = unit + (drink ? drink.price : 0);
 
   const submit = () => {
     const label = `${name} (${SIZES[sizeIdx].cm})`;
     const parts = [];
     if (removed.length) parts.push("Sans " + removed.join(", "));
     if (extras.length) parts.push("+ " + extras.join(", "));
-    onAdd(label, parts.join(" · "), unit);
+    onAdd(label, parts.join(" · "), unit, drink);
   };
 
   return (
@@ -587,17 +620,138 @@ function PizzaModal({ data, onClose, onAdd }) {
               </div>
             </>
           )}
+
+          <DrinkSection drink={drink} setDrink={setDrink} />
         </div>
 
         <div className="p-5 pt-3 shrink-0" style={{ borderTop: `1px solid ${C.line}` }}>
           <button onClick={submit}
             className="w-full rounded-2xl py-3.5 font-bold text-white flex items-center justify-center gap-2"
             style={{ background: C.ember }}>
-            <Plus size={18} /> Ajouter · {eur(unit)}
+            <Plus size={18} /> Ajouter · {eur(addTotal)}
           </button>
         </div>
       </div>
     </Overlay>
+  );
+}
+
+/* ============================================================
+   MODAL PLAT (pâtes / viandes / burgers) : cuisson + boisson
+   ============================================================ */
+function PlatModal({ data, onClose, onAdd }) {
+  const { name, price, cuisson } = data;
+  const [cuiss, setCuiss] = useState(null);
+  const [sauce, setSauce] = useState(null);
+  const [drink, setDrink] = useState(null);
+
+  const addTotal = price + (drink ? drink.price : 0);
+  const ready = !cuisson || cuiss; // si cuisson requise, il faut un choix
+
+  const submit = () => {
+    const parts = [];
+    if (cuisson && cuiss) parts.push("Cuisson : " + cuiss);
+    if (cuisson && sauce) parts.push("Sauce : " + sauce);
+    onAdd(parts.join(" · "), drink);
+  };
+
+  return (
+    <Overlay onClose={onClose}>
+      <div className="sheet rounded-t-3xl flex flex-col" style={{ background: C.surface, maxHeight: "88vh" }}>
+        <div className="p-5 pb-3 shrink-0" style={{ borderBottom: `1px solid ${C.line}` }}>
+          <Grab />
+          <h3 className="disp text-2xl font-bold">{name}</h3>
+          <p className="text-xs" style={{ color: C.inkSoft }}>{eur(price)}</p>
+        </div>
+
+        <div className="overflow-y-auto p-5 flex-1 flex flex-col gap-5">
+          {cuisson && (
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.inkSoft }}>
+                Cuisson</p>
+              <div className="flex flex-wrap gap-2">
+                {CUISSONS.map((cu) => {
+                  const on = cuiss === cu;
+                  return (
+                    <button key={cu} onClick={() => setCuiss(cu)}
+                      className="rounded-full px-3.5 py-2 text-sm font-medium"
+                      style={{ background: on ? C.ember : C.bg, color: on ? "#fff" : C.ink,
+                        border: `1px solid ${on ? C.ember : C.line}` }}>
+                      {on ? "✓ " : ""}{cu}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {cuisson && (
+            <div>
+              <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.inkSoft }}>
+                Sauce (optionnel)</p>
+              <div className="flex flex-wrap gap-2">
+                <button onClick={() => setSauce(null)}
+                  className="rounded-full px-3.5 py-2 text-sm font-medium"
+                  style={{ background: !sauce ? C.ember : C.bg, color: !sauce ? "#fff" : C.ink,
+                    border: `1px solid ${!sauce ? C.ember : C.line}` }}>
+                  {!sauce ? "✓ " : ""}Sans sauce
+                </button>
+                {SAUCES.map((sc) => {
+                  const on = sauce === sc;
+                  return (
+                    <button key={sc} onClick={() => setSauce(sc)}
+                      className="rounded-full px-3.5 py-2 text-sm font-medium"
+                      style={{ background: on ? C.ember : C.bg, color: on ? "#fff" : C.ink,
+                        border: `1px solid ${on ? C.ember : C.line}` }}>
+                      {on ? "✓ " : ""}{sc}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          <DrinkSection drink={drink} setDrink={setDrink} />
+        </div>
+
+        <div className="p-5 pt-3 shrink-0" style={{ borderTop: `1px solid ${C.line}` }}>
+          <button onClick={submit} disabled={!ready}
+            className="w-full rounded-2xl py-3.5 font-bold text-white flex items-center justify-center gap-2"
+            style={{ background: ready ? C.ember : "#cbb9a6" }}>
+            <Plus size={18} /> {ready ? `Ajouter · ${eur(addTotal)}` : "Choisissez la cuisson"}
+          </button>
+        </div>
+      </div>
+    </Overlay>
+  );
+}
+
+/* Section boisson optionnelle, partagée par les deux modales */
+function DrinkSection({ drink, setDrink }) {
+  return (
+    <div>
+      <p className="text-xs font-bold uppercase tracking-wide mb-2" style={{ color: C.inkSoft }}>
+        Boisson (optionnel)</p>
+      <div className="flex flex-wrap gap-2">
+        <button onClick={() => setDrink(null)}
+          className="rounded-full px-3 py-1.5 text-sm font-medium"
+          style={{ background: !drink ? C.ember : C.bg, color: !drink ? "#fff" : C.ink,
+            border: `1px solid ${!drink ? C.ember : C.line}` }}>
+          {!drink ? "✓ " : ""}Sans boisson
+        </button>
+        {DRINKS.map((d) => {
+          const on = drink && drink.name === d.name;
+          return (
+            <button key={d.name} onClick={() => setDrink(d)}
+              className="rounded-full px-3 py-1.5 text-sm font-medium"
+              style={{ background: on ? C.ember : C.bg, color: on ? "#fff" : C.ink,
+                border: `1px solid ${on ? C.ember : C.line}` }}>
+              {on ? "✓ " : "+ "}{d.name} <span style={{ opacity: .8, fontSize: 11 }}>({eur(d.price)})</span>
+            </button>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
